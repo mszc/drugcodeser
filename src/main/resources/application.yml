@@ -1,0 +1,40 @@
+
+server:
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+spring:
+  application:
+    name: drug-code-ser
+
+logging:
+  charset:
+    console: UTF-8
+    file: UTF-8
+
+taobao:
+  api:
+    server-url: https://gw.api.taobao.com/router/rest
+    app-key: 34836426
+    app-secret: 3e43c18e247acee596b6787098f0315b
+    format: json
+    sign-method: md5
+    connect-timeout: 30000
+    read-timeout: 60000
+    ref-ent-id: 66a9ca25e4b0d28410199e83
+    auth-ref-user-id: 66a9ca25e4b0d28410199e83
+    from-ref-user-id:
+    to-ref-user-id:
+    agent-ref-ent-id:
+    license: 25e34edd9ddc45bf948b8f91b7566b8b
+    license-token-cache-seconds: 86000
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
