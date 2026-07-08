@@ -1,9 +1,12 @@
 
 package com.example.drugcodeser.controller;
 
+import com.example.drugcodeser.dto.request.QueryCodeRelationRequest;
 import com.example.drugcodeser.dto.request.SearchBillDetailRequest;
 import com.example.drugcodeser.dto.request.SearchBillRequest;
 import com.example.drugcodeser.dto.request.UpbillDetailWithCodeRequest;
+import com.example.drugcodeser.dto.response.CodeRelationFilteredResponse;
+import com.taobao.api.response.AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse;
 import com.taobao.api.response.AlibabaAlihealthDrugKytWesSearchbillDetailResponse;
 import com.taobao.api.response.AlibabaAlihealthDrugKytWesSearchbillResponse;
 import com.taobao.api.response.AlibabaAlihealthDrugKytWesUpbillDetailwithcodeResponse;
@@ -81,6 +84,62 @@ public class DrugCodeController {
         log.info("接收到单据详情查询请求，单据号: {}, showCode: {}", request.getBillCode(), request.getShowCode());
         AlibabaAlihealthDrugKytWesSearchbillDetailResponse response =
                 drugCodeService.searchBillDetail(request);
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/code-relation")
+    @Operation(summary = "查询码关联关系（GET）", description = "通过追溯码查询码关联关系，包含上下级包装关系、药品信息、生产信息等")
+    public ResponseEntity<AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse> queryCodeRelation(
+            @Parameter(description = "追溯码", required = true)
+            @RequestParam String code,
+            @Parameter(description = "目标企业ID（可选）")
+            @RequestParam(required = false) String desRefEntId) {
+
+        log.info("接收到码关联关系查询请求（GET），追溯码: {}", code);
+
+        QueryCodeRelationRequest request = new QueryCodeRelationRequest();
+        request.setCode(code);
+        request.setDesRefEntId(desRefEntId);
+
+        AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse response =
+                drugCodeService.queryCodeRelation(request);
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/code-relation")
+    @Operation(summary = "查询码关联关系", description = "通过追溯码查询码关联关系，包含上下级包装关系、药品信息、生产信息等")
+    public ResponseEntity<AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse> queryCodeRelationPost(
+            @Valid @RequestBody QueryCodeRelationRequest request) {
+        log.info("接收到码关联关系查询请求，追溯码: {}", request.getCode());
+        AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse response =
+                drugCodeService.queryCodeRelation(request);
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/code-relation-filtered")
+    @Operation(summary = "查询码关联关系（过滤版）", description = "通过追溯码查询码关联关系，仅返回查询码及其下级码，不包含同级码和上级码")
+    public ResponseEntity<CodeRelationFilteredResponse> queryCodeRelationFiltered(
+            @Parameter(description = "追溯码", required = true)
+            @RequestParam String code,
+            @Parameter(description = "目标企业ID（可选）")
+            @RequestParam(required = false) String desRefEntId) {
+
+        log.info("接收到码关联关系过滤查询请求（GET），追溯码: {}", code);
+
+        QueryCodeRelationRequest request = new QueryCodeRelationRequest();
+        request.setCode(code);
+        request.setDesRefEntId(desRefEntId);
+
+        CodeRelationFilteredResponse response = drugCodeService.queryCodeRelationFiltered(request);
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/code-relation-filtered")
+    @Operation(summary = "查询码关联关系（过滤版POST）", description = "通过追溯码查询码关联关系，仅返回查询码及其下级码，不包含同级码和上级码")
+    public ResponseEntity<CodeRelationFilteredResponse> queryCodeRelationFilteredPost(
+            @Valid @RequestBody QueryCodeRelationRequest request) {
+        log.info("接收到码关联关系过滤查询请求，追溯码: {}", request.getCode());
+        CodeRelationFilteredResponse response = drugCodeService.queryCodeRelationFiltered(request);
         return ResponseEntity.ok(response);
     }
 }

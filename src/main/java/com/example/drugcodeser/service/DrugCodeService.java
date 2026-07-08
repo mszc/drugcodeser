@@ -4,22 +4,29 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.example.drugcodeser.client.TaobaoApiClient;
 import com.example.drugcodeser.config.TaobaoApiConfig;
+import com.example.drugcodeser.dto.request.QueryCodeRelationRequest;
 import com.example.drugcodeser.dto.request.SearchBillDetailRequest;
 import com.example.drugcodeser.dto.request.SearchBillRequest;
 import com.example.drugcodeser.dto.request.UpbillDetailWithCodeRequest;
+import com.example.drugcodeser.dto.response.CodeRelationFilteredResponse;
 import com.taobao.api.request.AlibabaAlihealthDrugCodeKytWesLicenseTokenGetRequest;
+import com.taobao.api.request.AlibabaAlihealthDrugCodeKytWesQuerycoderelationRequest;
 import com.taobao.api.request.AlibabaAlihealthDrugKytWesSearchbillDetailRequest;
 import com.taobao.api.request.AlibabaAlihealthDrugKytWesSearchbillRequest;
 import com.taobao.api.request.AlibabaAlihealthDrugKytWesUpbillDetailwithcodeRequest;
 import com.taobao.api.response.AlibabaAlihealthDrugCodeKytWesLicenseTokenGetResponse;
+import com.taobao.api.response.AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse;
 import com.taobao.api.response.AlibabaAlihealthDrugKytWesSearchbillDetailResponse;
 import com.taobao.api.response.AlibabaAlihealthDrugKytWesSearchbillResponse;
 import com.taobao.api.response.AlibabaAlihealthDrugKytWesUpbillDetailwithcodeResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -245,6 +252,121 @@ public class DrugCodeService {
                 throw new RuntimeException("API调用失败: " + errorMsg);
             }
         }
+    }
+
+    // ==================== 码关联关系查询 ====================
+
+    /**
+     * 通过追溯码查询码关联关系
+     */
+    public AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse queryCodeRelation(QueryCodeRelationRequest request) {
+        log.info("查询码关联关系，追溯码: {}", request.getCode());
+
+        boolean retried = false;
+        String licenseToken;
+        while (true) {
+            licenseToken = getLicenseToken();
+
+            AlibabaAlihealthDrugCodeKytWesQuerycoderelationRequest taobaoRequest =
+                    new AlibabaAlihealthDrugCodeKytWesQuerycoderelationRequest();
+            taobaoRequest.setRefEntId(taobaoApiConfig.getRefEntId());
+            taobaoRequest.setLicenseToken(licenseToken);
+            taobaoRequest.setCode(request.getCode());
+            String desRefEntId = (request.getDesRefEntId() != null && !request.getDesRefEntId().isEmpty())
+                    ? request.getDesRefEntId() : taobaoApiConfig.getRefEntId();
+            taobaoRequest.setDesRefEntId(desRefEntId);
+
+            AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse response =
+                    taobaoApiClient.execute(taobaoRequest);
+
+            log.info("码关联关系API完整响应: {}", response.getBody());
+
+            if (response.isSuccess()) {
+                if (response.getResult() != null && Boolean.TRUE.equals(response.getResult().getResponseSuccess())) {
+                    log.info("查询成功，消息码: {}, 消息: {}",
+                            response.getResult().getMsgCode(),
+                            response.getResult().getMsgInfo());
+                    if (response.getResult().getModelList() != null) {
+                        log.info("关联关系数: {}", response.getResult().getModelList().size());
+                    } else {
+                        log.warn("modelList为空，无关联数据返回");
+                    }
+                    return response;
+                } else {
+                    String bizMsg = response.getResult() != null ?
+                            response.getResult().getMsgCode() + ": " + response.getResult().getMsgInfo() : "未知业务错误";
+                    log.error("业务失败: {}", bizMsg);
+                    throw new RuntimeException("业务失败: " + bizMsg);
+                }
+            } else {
+                String errorMsg = getErrorMessage(response);
+                if (!retried && isTokenInvalidError(errorMsg)) {
+                    log.warn("检测到Token无效，清除缓存并重试一次...");
+                    clearCachedToken();
+                    retried = true;
+                    continue;
+                }
+                log.error("API调用失败: {}", errorMsg);
+                throw new RuntimeException("API调用失败: " + errorMsg);
+            }
+        }
+    }
+
+    /**
+     * 查询码关联关系（过滤版）—— 仅返回查询码及其下级码，不包含同级码和上级码
+     */
+    public CodeRelationFilteredResponse queryCodeRelationFiltered(QueryCodeRelationRequest request) {
+        AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse response = queryCodeRelation(request);
+        AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse.ResultModel result = response.getResult();
+        if (result == null || result.getModelList() == null || result.getModelList().isEmpty()) {
+            throw new RuntimeException("码关联关系查询无结果");
+        }
+
+        String queryCode = request.getCode();
+        List<AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse.CodeRelationDto> modelList = result.getModelList();
+
+        // 在 modelList 中找到匹配查询码的 CodeRelationDto
+        AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse.CodeRelationDto matchedDto = null;
+        for (AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse.CodeRelationDto dto : modelList) {
+            if (queryCode.equals(dto.getCode())) {
+                matchedDto = dto;
+                break;
+            }
+        }
+        if (matchedDto == null) {
+            throw new RuntimeException("未找到追溯码 " + queryCode + " 的关联关系");
+        }
+
+        List<AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse.CodeInfo> rawList = matchedDto.getCodeRelationList();
+        log.info("原始关联关系数: {}", rawList != null ? rawList.size() : 0);
+
+        // 过滤：只保留查询码本身 + 以查询码为父级的子码
+        List<CodeRelationFilteredResponse.CodeRelationItem> filteredList = new ArrayList<>();
+        if (rawList != null) {
+            for (AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse.CodeInfo info : rawList) {
+                if (queryCode.equals(info.getCode()) || queryCode.equals(info.getParentCode())) {
+                    CodeRelationFilteredResponse.CodeRelationItem item = new CodeRelationFilteredResponse.CodeRelationItem();
+                    item.setCode(info.getCode());
+                    item.setCodeLevel(info.getCodeLevel());
+                    item.setCodePackLevel(info.getCodePackLevel());
+                    item.setParentCode(info.getParentCode());
+                    item.setStatus(info.getStatus());
+                    filteredList.add(item);
+                }
+            }
+        }
+        log.info("过滤后关联关系数: {} (仅含查询码及其下级码)", filteredList.size());
+
+        CodeRelationFilteredResponse resultResponse = new CodeRelationFilteredResponse();
+        resultResponse.setQueryCode(queryCode);
+        resultResponse.setIsSmallest(matchedDto.getIsSmallest());
+        resultResponse.setCodeRelationList(filteredList);
+        resultResponse.setBaseInfos(matchedDto.getBaseInfosDTO());
+        resultResponse.setCodeActiveInfo(matchedDto.getCodeActiveInfoDTO());
+        resultResponse.setProduceInfoList(matchedDto.getProduceInfoList());
+        resultResponse.setPkgInfo(matchedDto.getPkgInfoDTO());
+
+        return resultResponse;
     }
 
     // ==================== Token 缓存管理 ====================

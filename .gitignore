@@ -9,7 +9,7 @@ target/
 .project
 .classpath
 # IDE-decompiled class files
-com/
+/com/
 
 # Logs
 logs/
