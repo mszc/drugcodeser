@@ -36,6 +36,15 @@ public class CodeRelationFilteredResponse {
     @Schema(description = "包装信息")
     private Object pkgInfo;
 
+    /**
+     * 从 baseInfos.baseInfoList[0] 提取，用于匹配单据明细中的药品
+     */
+    @Schema(description = "药品ID（用于匹配）")
+    private String prodId;
+
+    @Schema(description = "生产批号（用于匹配）")
+    private String produceBatchNo;
+
     @Data
     @Schema(description = "码关联项")
     public static class CodeRelationItem {

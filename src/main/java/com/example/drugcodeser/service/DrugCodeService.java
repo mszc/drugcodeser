@@ -8,6 +8,8 @@ import com.example.drugcodeser.dto.request.QueryCodeRelationRequest;
 import com.example.drugcodeser.dto.request.SearchBillDetailRequest;
 import com.example.drugcodeser.dto.request.SearchBillRequest;
 import com.example.drugcodeser.dto.request.UpbillDetailWithCodeRequest;
+import com.example.drugcodeser.dto.response.BillDetailItemWithCodesDto;
+import com.example.drugcodeser.dto.response.BillDetailWithCodeRelationsResponse;
 import com.example.drugcodeser.dto.response.CodeRelationFilteredResponse;
 import com.taobao.api.request.AlibabaAlihealthDrugCodeKytWesLicenseTokenGetRequest;
 import com.taobao.api.request.AlibabaAlihealthDrugCodeKytWesQuerycoderelationRequest;
@@ -23,9 +25,16 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -41,6 +50,154 @@ public class DrugCodeService {
     }
 
     // ==================== 业务接口 ====================
+
+    /**
+     * 查询单据详情 + 码关联关系聚合 —— 将每个追溯码的关联关系按药品匹配并入单据明细
+     */
+    public BillDetailWithCodeRelationsResponse searchBillDetailWithCodeRelations(SearchBillDetailRequest request) {
+        // 先查单据详情
+        AlibabaAlihealthDrugKytWesSearchbillDetailResponse billResponse = searchBillDetail(request);
+        AlibabaAlihealthDrugKytWesSearchbillDetailResponse.BillInOutDetailDto model = billResponse.getResult().getModel();
+        if (model == null) {
+            throw new RuntimeException("单据详情无数据");
+        }
+
+        List<String> codes = model.getCodes();
+        log.info("单据 {} 共有 {} 个追溯码，开始查询每个码的关联关系", model.getBillCode(),
+                codes != null ? codes.size() : 0);
+
+        // 多线程查询每个追溯码的过滤版关联关系，带限流控制
+        Map<String, List<CodeRelationFilteredResponse.CodeRelationItem>> codeRelationMap = new LinkedHashMap<>();
+        if (codes != null && !codes.isEmpty()) {
+            int total = codes.size();
+            AtomicInteger done = new AtomicInteger(0);
+            Semaphore apiSemaphore = new Semaphore(3);
+            AtomicLong lastApiCallTime = new AtomicLong(0);
+            long minIntervalMs = 300;
+            ExecutorService executor = Executors.newFixedThreadPool(10);
+            try {
+                List<CompletableFuture<Void>> futures = new ArrayList<>();
+                for (String code : codes) {
+                    futures.add(CompletableFuture.runAsync(() -> {
+                        int current = done.incrementAndGet();
+                        log.debug("正在查询码关联关系 [{}/{}]: {}", current, total, code);
+                        try {
+                            apiSemaphore.acquire();
+                            try {
+                                // 限流：确保两次请求至少间隔 minIntervalMs
+                                long now;
+                                long lastCall;
+                                do {
+                                    now = System.currentTimeMillis();
+                                    lastCall = lastApiCallTime.get();
+                                    long waitMs = lastCall + minIntervalMs - now;
+                                    if (waitMs > 0) {
+                                        Thread.sleep(waitMs);
+                                    }
+                                } while (!lastApiCallTime.compareAndSet(lastCall,
+                                        Math.max(System.currentTimeMillis(), lastCall + minIntervalMs)));
+
+                                // 带重试的 API 调用（限流时最多重试3次）
+                                CodeRelationFilteredResponse filtered = null;
+                                for (int attempt = 0; attempt < 3; attempt++) {
+                                    try {
+                                        QueryCodeRelationRequest codeReq = new QueryCodeRelationRequest();
+                                        codeReq.setCode(code);
+                                        filtered = queryCodeRelationFiltered(codeReq);
+                                        break;
+                                    } catch (Exception e) {
+                                        boolean isLimit = e.getMessage() != null
+                                                && e.getMessage().contains("LIMIT");
+                                        if (isLimit && attempt < 2) {
+                                            log.warn("追溯码 {} 触发限流，第{}次重试...", code, attempt + 1);
+                                            Thread.sleep(1000L * (attempt + 1));
+                                        } else {
+                                            throw e;
+                                        }
+                                    }
+                                }
+                                if (filtered != null && filtered.getCodeRelationList() != null
+                                        && !filtered.getCodeRelationList().isEmpty()) {
+                                    String matchKey = (filtered.getProdId() != null ? filtered.getProdId() : "")
+                                            + "#" + (filtered.getProduceBatchNo() != null ? filtered.getProduceBatchNo() : "");
+                                    synchronized (codeRelationMap) {
+                                        codeRelationMap.computeIfAbsent(matchKey, k -> new ArrayList<>())
+                                                .addAll(filtered.getCodeRelationList());
+                                    }
+                                }
+                            } finally {
+                                apiSemaphore.release();
+                            }
+                        } catch (Exception e) {
+                            log.error("追溯码 {} 关联关系查询失败，跳过: {}", code, e.getMessage());
+                        }
+                    }, executor));
+                }
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+            } finally {
+                executor.shutdown();
+            }
+        }
+        log.info("码关联关系分组完成，共 {} 个匹配组", codeRelationMap.size());
+
+        // 构建响应：将 codeRelationList 按匹配规则并入 billChkInOutDetailList 的每一项
+        List<BillDetailItemWithCodesDto> detailItems = new ArrayList<>();
+        List<AlibabaAlihealthDrugKytWesSearchbillDetailResponse.Billchkinoutdetaillistdtolist> rawDetailList =
+                model.getBillChkInOutDetailListDTOList();
+        if (rawDetailList != null) {
+            for (AlibabaAlihealthDrugKytWesSearchbillDetailResponse.Billchkinoutdetaillistdtolist rawItem : rawDetailList) {
+                BillDetailItemWithCodesDto item = new BillDetailItemWithCodesDto();
+                item.setApproveNo(rawItem.getApproveNo());
+                item.setDrugEntBaseInfoId(rawItem.getDrugEntBaseInfoId());
+                item.setExpiredDate(rawItem.getExpiredDate());
+                item.setMinPkgCount(rawItem.getMinPkgCount());
+                item.setMinPreparationsCount(rawItem.getMinPreparationsCount());
+                item.setPhysicName(rawItem.getPhysicName());
+                item.setPhysicType(rawItem.getPhysicType());
+                item.setPhysicTypeName(rawItem.getPhysicTypeName());
+                item.setPreparationsUnit(rawItem.getPreparationsUnit());
+                item.setProdCode(rawItem.getProdCode());
+                item.setProduceDate(rawItem.getProduceDate());
+                item.setProduceEntName(rawItem.getProduceEntName());
+                item.setProductBatchNo(rawItem.getProductBatchNo());
+                item.setProductCode(rawItem.getProductCode());
+                item.setTempPkgSpec(rawItem.getTempPkgSpec());
+
+                // 按 drugEntBaseInfoId + productBatchNo 匹配 codeRelationList
+                String itemKey = (rawItem.getDrugEntBaseInfoId() != null ? rawItem.getDrugEntBaseInfoId() : "")
+                        + "#" + (rawItem.getProductBatchNo() != null ? rawItem.getProductBatchNo() : "");
+                item.setCodeRelationList(codeRelationMap.getOrDefault(itemKey, new ArrayList<>()));
+                detailItems.add(item);
+            }
+        }
+
+        BillDetailWithCodeRelationsResponse.BillDetailModel billModel = new BillDetailWithCodeRelationsResponse.BillDetailModel();
+        billModel.setBillCode(model.getBillCode());
+        billModel.setBillOutId(model.getBillOutId());
+        billModel.setBillTime(model.getBillTime());
+        billModel.setBillType(model.getBillType());
+        billModel.setBillTypeName(model.getBillTypeName());
+        billModel.setFromEntName(model.getFromEntName());
+        billModel.setFromUserId(model.getFromUserId());
+        billModel.setToEntName(model.getToEntName());
+        billModel.setToUserId(model.getToUserId());
+        billModel.setModDate(model.getModDate());
+        billModel.setProcessDate(model.getProcessDate());
+        billModel.setBillChkInOutDetailList(detailItems);
+
+        BillDetailWithCodeRelationsResponse.Result result = new BillDetailWithCodeRelationsResponse.Result();
+        result.setModel(billModel);
+        result.setMsgCode("SUCCESS");
+        result.setMsgInfo("调用成功");
+        result.setResponseSuccess(true);
+
+        BillDetailWithCodeRelationsResponse response = new BillDetailWithCodeRelationsResponse();
+        response.setSuccess(true);
+        response.setResult(result);
+
+        log.info("单据 {} 聚合完成，明细项: {} 条", model.getBillCode(), detailItems.size());
+        return response;
+    }
 
     /**
      * 查询单据详情（含药品信息和追溯码）
@@ -68,15 +225,15 @@ public class DrugCodeService {
             AlibabaAlihealthDrugKytWesSearchbillDetailResponse response =
                     taobaoApiClient.execute(taobaoRequest);
 
-            log.info("单据详情API完整响应: {}", response.getBody());
+            log.debug("单据详情API完整响应: {}", response.getBody());
 
             if (response.isSuccess()) {
                 if (response.getResult() != null && Boolean.TRUE.equals(response.getResult().getResponseSuccess())) {
-                    log.info("查询成功，消息码: {}, 消息: {}",
+                    log.debug("查询成功，消息码: {}, 消息: {}",
                             response.getResult().getMsgCode(),
                             response.getResult().getMsgInfo());
                     if (response.getResult().getModel() != null) {
-                        log.info("model详情 - 单据号: {}, 发货企业: {}, 收货企业: {}, 药品明细数: {}, 追溯码数: {}",
+                        log.debug("model详情 - 单据号: {}, 发货企业: {}, 收货企业: {}, 药品明细数: {}, 追溯码数: {}",
                                 response.getResult().getModel().getBillCode(),
                                 response.getResult().getModel().getFromEntName(),
                                 response.getResult().getModel().getToEntName(),
@@ -151,15 +308,15 @@ public class DrugCodeService {
             AlibabaAlihealthDrugKytWesSearchbillResponse response =
                     taobaoApiClient.execute(taobaoRequest);
 
-            log.info("批量查询API完整响应: {}", response.getBody());
+            log.debug("批量查询API完整响应: {}", response.getBody());
 
             if (response.isSuccess()) {
                 if (response.getResult() != null && Boolean.TRUE.equals(response.getResult().getSuccess())) {
-                    log.info("批量查询成功，消息码: {}, 消息: {}",
+                    log.debug("批量查询成功，消息码: {}, 消息: {}",
                             response.getResult().getMsgCode(),
                             response.getResult().getMsgInfo());
                     if (response.getResult().getModel() != null) {
-                        log.info("总数: {}, 当前页条数: {}",
+                        log.debug("总数: {}, 当前页条数: {}",
                                 response.getResult().getModel().getTotalNum(),
                                 response.getResult().getModel().getResultList() != null ?
                                         response.getResult().getModel().getResultList().size() : 0);
@@ -226,11 +383,11 @@ public class DrugCodeService {
             AlibabaAlihealthDrugKytWesUpbillDetailwithcodeResponse response =
                     taobaoApiClient.execute(taobaoRequest);
 
-            log.info("上游出库单API完整响应: {}", response.getBody());
+            log.debug("上游出库单API完整响应: {}", response.getBody());
 
             if (response.isSuccess()) {
                 if (response.getResult() != null && Boolean.TRUE.equals(response.getResult().getSuccess())) {
-                    log.info("查询成功，消息码: {}, 消息: {}",
+                    log.debug("查询成功，消息码: {}, 消息: {}",
                             response.getResult().getMsgCode(),
                             response.getResult().getMsgInfo());
                     return response;
@@ -279,15 +436,15 @@ public class DrugCodeService {
             AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse response =
                     taobaoApiClient.execute(taobaoRequest);
 
-            log.info("码关联关系API完整响应: {}", response.getBody());
+            log.debug("码关联关系API完整响应: {}", response.getBody());
 
             if (response.isSuccess()) {
                 if (response.getResult() != null && Boolean.TRUE.equals(response.getResult().getResponseSuccess())) {
-                    log.info("查询成功，消息码: {}, 消息: {}",
+                    log.debug("查询成功，消息码: {}, 消息: {}",
                             response.getResult().getMsgCode(),
                             response.getResult().getMsgInfo());
                     if (response.getResult().getModelList() != null) {
-                        log.info("关联关系数: {}", response.getResult().getModelList().size());
+                        log.debug("关联关系数: {}", response.getResult().getModelList().size());
                     } else {
                         log.warn("modelList为空，无关联数据返回");
                     }
@@ -338,7 +495,7 @@ public class DrugCodeService {
         }
 
         List<AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse.CodeInfo> rawList = matchedDto.getCodeRelationList();
-        log.info("原始关联关系数: {}", rawList != null ? rawList.size() : 0);
+        log.debug("原始关联关系数: {}", rawList != null ? rawList.size() : 0);
 
         // 过滤：只保留查询码本身 + 以查询码为父级的子码
         List<CodeRelationFilteredResponse.CodeRelationItem> filteredList = new ArrayList<>();
@@ -355,7 +512,7 @@ public class DrugCodeService {
                 }
             }
         }
-        log.info("过滤后关联关系数: {} (仅含查询码及其下级码)", filteredList.size());
+        log.debug("过滤后关联关系数: {} (仅含查询码及其下级码)", filteredList.size());
 
         CodeRelationFilteredResponse resultResponse = new CodeRelationFilteredResponse();
         resultResponse.setQueryCode(queryCode);
@@ -365,6 +522,14 @@ public class DrugCodeService {
         resultResponse.setCodeActiveInfo(matchedDto.getCodeActiveInfoDTO());
         resultResponse.setProduceInfoList(matchedDto.getProduceInfoList());
         resultResponse.setPkgInfo(matchedDto.getPkgInfoDTO());
+
+        // 从 baseInfos.baseInfoList[0] 提取 prodId 和 produceBatchNo，用于后续与单据明细匹配
+        AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse.BaseInfosDto baseInfosDto = matchedDto.getBaseInfosDTO();
+        if (baseInfosDto != null && baseInfosDto.getBaseInfoList() != null && !baseInfosDto.getBaseInfoList().isEmpty()) {
+            AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse.BaseInfoDto firstBaseInfo = baseInfosDto.getBaseInfoList().get(0);
+            resultResponse.setProdId(firstBaseInfo.getProdId());
+            resultResponse.setProduceBatchNo(firstBaseInfo.getProduceBatchNo());
+        }
 
         return resultResponse;
     }
@@ -383,7 +548,7 @@ public class DrugCodeService {
         String cachedToken = tokenCache.get(refEntId);
         Long expireTime = tokenExpireCache.get(refEntId);
         if (cachedToken != null && expireTime != null && now < expireTime) {
-            log.info("使用缓存的licenseToken: {}", cachedToken);
+            log.debug("使用缓存的licenseToken: {}", cachedToken);
             return cachedToken;
         }
 
@@ -408,7 +573,7 @@ public class DrugCodeService {
         String refEntId = taobaoApiConfig.getRefEntId();
 
         log.info("调用 license.token.get 获取新token...");
-        log.info("参数 - refEntId: {}, license: {}", refEntId, taobaoApiConfig.getLicense());
+        log.debug("参数 - refEntId: {}, license: {}", refEntId, taobaoApiConfig.getLicense());
 
         AlibabaAlihealthDrugCodeKytWesLicenseTokenGetRequest request =
                 new AlibabaAlihealthDrugCodeKytWesLicenseTokenGetRequest();
@@ -418,14 +583,14 @@ public class DrugCodeService {
         AlibabaAlihealthDrugCodeKytWesLicenseTokenGetResponse response =
                 taobaoApiClient.execute(request);
 
-        log.info("licenseToken API 完整响应: {}", response.getBody());
+        log.debug("licenseToken API 完整响应: {}", response.getBody());
 
         if (response.isSuccess() && response.getResult() != null
                 && response.getResult().getModel() != null) {
             AlibabaAlihealthDrugCodeKytWesLicenseTokenGetResponse.TokenInfo tokenInfo =
                     response.getResult().getModel();
             String licenseToken = tokenInfo.getLicenseToken();
-            log.info("licenseToken 获取成功: {}", licenseToken);
+            log.debug("licenseToken 获取成功: {}", licenseToken);
 
             tokenCache.put(refEntId, licenseToken);
             tokenExpireCache.put(refEntId, now + taobaoApiConfig.getLicenseTokenCacheSeconds() * 1000L);

@@ -5,6 +5,7 @@ import com.example.drugcodeser.dto.request.QueryCodeRelationRequest;
 import com.example.drugcodeser.dto.request.SearchBillDetailRequest;
 import com.example.drugcodeser.dto.request.SearchBillRequest;
 import com.example.drugcodeser.dto.request.UpbillDetailWithCodeRequest;
+import com.example.drugcodeser.dto.response.BillDetailWithCodeRelationsResponse;
 import com.example.drugcodeser.dto.response.CodeRelationFilteredResponse;
 import com.taobao.api.response.AlibabaAlihealthDrugCodeKytWesQuerycoderelationResponse;
 import com.taobao.api.response.AlibabaAlihealthDrugKytWesSearchbillDetailResponse;
@@ -85,6 +86,46 @@ public class DrugCodeController {
         AlibabaAlihealthDrugKytWesSearchbillDetailResponse response =
                 drugCodeService.searchBillDetail(request);
         return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/search-bill-detail-with-relations")
+    @Operation(summary = "查询单据详情（含码关联关系）", description = "根据单据号查询单据详情，并将每个追溯码替换为其过滤版关联关系（仅含查询码及其下级码）")
+    public ResponseEntity<BillDetailWithCodeRelationsResponse> searchBillDetailWithCodeRelations(
+            @Parameter(description = "单据号", required = true)
+            @RequestParam String billCode,
+            @Parameter(description = "是否显示追溯码，1=显示 0=不显示")
+            @RequestParam(required = false, defaultValue = "1") String showCode) {
+
+        log.info("接收到单据详情+关联关系查询请求（GET），单据号: {}", billCode);
+        SearchBillDetailRequest request = new SearchBillDetailRequest();
+        request.setBillCode(billCode);
+        request.setShowCode(showCode);
+        return executeWithCodeRelations(request);
+    }
+
+    @PostMapping("/search-bill-detail-with-relations")
+    @Operation(summary = "查询单据详情（含码关联关系）", description = "根据单据号查询单据详情，并将每个追溯码替换为其过滤版关联关系（仅含查询码及其下级码）")
+    public ResponseEntity<BillDetailWithCodeRelationsResponse> searchBillDetailWithCodeRelationsPost(
+            @Valid @RequestBody SearchBillDetailRequest request) {
+        log.info("接收到单据详情+关联关系查询请求，单据号: {}", request.getBillCode());
+        return executeWithCodeRelations(request);
+    }
+
+    private ResponseEntity<BillDetailWithCodeRelationsResponse> executeWithCodeRelations(SearchBillDetailRequest request) {
+        try {
+            BillDetailWithCodeRelationsResponse response = drugCodeService.searchBillDetailWithCodeRelations(request);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("单据详情+关联关系查询失败: {}", e.getMessage(), e);
+            BillDetailWithCodeRelationsResponse.Result result = new BillDetailWithCodeRelationsResponse.Result();
+            result.setMsgCode("FAILURE");
+            result.setMsgInfo(e.getMessage());
+            result.setResponseSuccess(false);
+            BillDetailWithCodeRelationsResponse errorResponse = new BillDetailWithCodeRelationsResponse();
+            errorResponse.setSuccess(false);
+            errorResponse.setResult(result);
+            return ResponseEntity.ok(errorResponse);
+        }
     }
 
     @GetMapping("/code-relation")
