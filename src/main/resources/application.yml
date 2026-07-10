@@ -10,27 +10,52 @@ server:
 spring:
   application:
     name: drug-code-ser
+  datasource:
+    url: jdbc:mysql://localhost:3306/drugcodeser?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
+    username: root
+    password: your_password
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+        format_sql: true
+  redis:
+    host: localhost
+    port: 6379
+    password:
+    timeout: 5000ms
+    lettuce:
+      pool:
+        max-active: 8
+        max-idle: 8
+        min-idle: 0
 
 logging:
   charset:
     console: UTF-8
     file: UTF-8
+  level:
+    com.example.drugcodeser.service: INFO
 
 taobao:
   api:
     server-url: https://gw.api.taobao.com/router/rest
-    app-key: 
-    app-secret: 
+    app-key: 34836426
+    app-secret: 3e43c18e247acee596b6787098f0315b
     format: json
     sign-method: md5
     connect-timeout: 30000
     read-timeout: 60000
-    ref-ent-id: 
-    auth-ref-user-id: 
+    ref-ent-id: 66a9ca25e4b0d28410199e83
+    auth-ref-user-id: 66a9ca25e4b0d28410199e83
     from-ref-user-id:
     to-ref-user-id:
     agent-ref-ent-id:
-    license: 
+    license: 25e34edd9ddc45bf948b8f91b7566b8b
     license-token-cache-seconds: 86000
 
 springdoc:

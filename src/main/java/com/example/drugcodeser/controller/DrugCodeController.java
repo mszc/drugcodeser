@@ -11,6 +11,7 @@ import com.taobao.api.response.AlibabaAlihealthDrugCodeKytWesQuerycoderelationRe
 import com.taobao.api.response.AlibabaAlihealthDrugKytWesSearchbillDetailResponse;
 import com.taobao.api.response.AlibabaAlihealthDrugKytWesSearchbillResponse;
 import com.taobao.api.response.AlibabaAlihealthDrugKytWesUpbillDetailwithcodeResponse;
+import com.example.drugcodeser.service.BillDetailCacheService;
 import com.example.drugcodeser.service.DrugCodeService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -28,9 +29,11 @@ import javax.validation.Valid;
 public class DrugCodeController {
 
     private final DrugCodeService drugCodeService;
+    private final BillDetailCacheService cacheService;
 
-    public DrugCodeController(DrugCodeService drugCodeService) {
+    public DrugCodeController(DrugCodeService drugCodeService, BillDetailCacheService cacheService) {
         this.drugCodeService = drugCodeService;
+        this.cacheService = cacheService;
     }
 
     @GetMapping("/upbill-detail")
@@ -176,11 +179,30 @@ public class DrugCodeController {
     }
 
     @PostMapping("/code-relation-filtered")
-    @Operation(summary = "查询码关联关系（过滤版POST）", description = "通过追溯码查询码关联关系，仅返回查询码及其下级码，不包含同级码和上级码")
+    @Operation(summary = "查询码关联关系（过滤版）", description = "通过追溯码查询码关联关系，仅返回查询码及其下级码，不包含同级码和上级码")
     public ResponseEntity<CodeRelationFilteredResponse> queryCodeRelationFilteredPost(
             @Valid @RequestBody QueryCodeRelationRequest request) {
         log.info("接收到码关联关系过滤查询请求，追溯码: {}", request.getCode());
         CodeRelationFilteredResponse response = drugCodeService.queryCodeRelationFiltered(request);
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/search-bill-detail-with-relations-cached")
+    @Operation(summary = "查询单据详情（含码关联关系，优先缓存）", description = "优先从 Redis/MySQL 缓存查询，缓存未命中时调用上游接口并回写缓存")
+    public ResponseEntity<BillDetailWithCodeRelationsResponse> searchBillDetailWithRelationsCached(
+            @Parameter(description = "单据号", required = true)
+            @RequestParam String billCode) {
+        log.info("接收到单据详情+关联关系缓存查询请求（GET），单据号: {}", billCode);
+        BillDetailWithCodeRelationsResponse response = cacheService.getBillDetailWithCache(billCode);
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/search-bill-detail-with-relations-cached")
+    @Operation(summary = "查询单据详情（含码关联关系，优先缓存）", description = "优先从 Redis/MySQL 缓存查询，缓存未命中时调用上游接口并回写缓存")
+    public ResponseEntity<BillDetailWithCodeRelationsResponse> searchBillDetailWithRelationsCachedPost(
+            @Valid @RequestBody SearchBillDetailRequest request) {
+        log.info("接收到单据详情+关联关系缓存查询请求，单据号: {}", request.getBillCode());
+        BillDetailWithCodeRelationsResponse response = cacheService.getBillDetailWithCache(request.getBillCode());
         return ResponseEntity.ok(response);
     }
 }

@@ -200,6 +200,16 @@ public class DrugCodeService {
     }
 
     /**
+     * 查询单据详情 + 码关联关系聚合（仅需单据号的便捷方法）
+     */
+    public BillDetailWithCodeRelationsResponse searchBillDetailWithCodeRelations(String billCode) {
+        SearchBillDetailRequest request = new SearchBillDetailRequest();
+        request.setBillCode(billCode);
+        request.setShowCode("1");
+        return searchBillDetailWithCodeRelations(request);
+    }
+
+    /**
      * 查询单据详情（含药品信息和追溯码）
      */
     public AlibabaAlihealthDrugKytWesSearchbillDetailResponse searchBillDetail(SearchBillDetailRequest request) {
